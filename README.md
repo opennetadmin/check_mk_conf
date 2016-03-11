@@ -34,7 +34,9 @@ check_mk tag named <ca_key>-<ca_value>.  Also all ONA tags are directly associat
 Wato host tags are only comprised of custom attributes from ONA.
 ```
 pass the module the tag option to select hosts that should be built into the all_hosts variable.
-By default any host with the 'monitor' tag will be pulled in.
+By default any host with the 'monitor' tag will be pulled in. You can set individual
+hosts with a monitor flag of Y or N.  You can also set a subnet monitor flag
+to N and this will disable all hosts on that subnet.
 
 There are two modes to run in `wato_host_tags` and `all_hosts`.
 
@@ -42,3 +44,4 @@ There are two modes to run in `wato_host_tags` and `all_hosts`.
 `all_hosts` is intended to configure conf.d/ona.mk or similar
 
 You should issue a omd -I and an omd -O after you have updated those files using this module
+

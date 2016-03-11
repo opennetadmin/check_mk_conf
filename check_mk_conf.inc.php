@@ -36,7 +36,7 @@ function check_mk_conf($options="") {
     $version = '1.00';
     // default search tag 
     $match = 'monitor';
-    $lifecycles = array();
+    $lifecycles = array('notset');
     $tags = array();
 
     printmsg("DEBUG => check_mk_conf({$options}) called", 3);
@@ -45,32 +45,57 @@ function check_mk_conf($options="") {
     $options = parse_options($options);
 
     // Return the usage summary if we need to
-    if ($options['help'] or !($options['wato_host_tags'] or $options['all_hosts'] or $options['groups']) ) {
+    if ($options['help'] or !($options['wato_host_tags'] or $options['all_hosts'] or $options['groups'] or $options['wato_groups']) ) {
         // NOTE: Help message lines should not exceed 80 characters for proper display on a console
         $self['error'] = 'ERROR => Insufficient parameters';
         return(array(1,
 <<<EOM
 
 check_mk_conf-v{$version}
-Generate check_mk configuration of specified type
+Generate various output types of check_mk configuration
 
   Synopsis: check_mk_conf [KEY=VALUE] ...
 
   Required:
     wato_host_tags    Configs for multisite. Store in multisite.d
-    all_hosts         Configs for check_mk. Store in conf.d
-    groups            Configs for check_mk. Store in conf.d
+     or
+    all_hosts         Configs for check_mk. Store in conf.d/ona
+     or
+    wato_groups       Configs for WATO groups. Store in conf.d/wato/groups.mk
+     or
+    groups            Configs for check_mk. Store in conf.d/ona
 
   Optional:
     match=<name>      Custom attribute name to select which hosts to monitor. Default: {$match}
                       Will only match hosts that have a value other than 'N'
+                      All hosts on a subnet can be excluded by setting the CA
+                      for that subnet to 'N'.
 
-Processes all Custom Attributes except those defined in the ignore list into a
-check_mk tag named <ca_key>-<ca_value>.  Also all ONA tags are directly associated as well.
+wato_host_tags: Builds a list of tag groups for use inside the WATO web gui.
+                This does not assoicate hosts to tags, just provides dropdowns.
+                This is built from custom attributes. There is a group called
+                tags that lists all tags available within ONA.
 
-Host and service groups will live in their own file. Use the groups option to build it
+all_hosts: Extract all hosts from ONA and build check_mk tags for that host
+           using Custom Attributes and tags from ONA.
 
-Wato host tags are only comprised of custom attributes from ONA.
+wato_groups: Builds the GUI dropdown list of groups. This is for the GUI only.
+
+groups: Build groups for all hosts and services. A group is created that
+        corresponds the the lifecycle custom attribute defined on the host.
+        This file must live in conf.d/wato/groups.mk to be read properly.
+        
+NOTE: It is expected that you will run the update-omd-from-ona.sh script to
+      invoke each of these output types and place them in the proper location.
+
+NOTE: A tag will be built to define a site. This is used for distributed
+      multisite environments. By default it will use the hosts location reference
+      but can be overriden by setting a custom attribute called 'cmk_site'. Since
+      ONA stores site references in upper case, we will enforce that throughout.
+
+NOTE: check_mk_conf processes all Custom Attributes except those defined in 
+the ignore list into a check_mk tag named <ca_key>-<ca_value>. Also all ONA
+tags are directly associated as well with no exceptions.
 
 EOM
         ));
@@ -85,19 +110,25 @@ EOM
   if (isset($options['match'])) { $match = $options['match']; }
 
   // Build configuration for check_mk all_hosts value
-  if (isset($options['all_hosts']) or isset($options['groups'])) {
+  if (isset($options['all_hosts']) or isset($options['groups']) or isset($options['wato_groups'])) {
     // Query to gather all custom attributes for hosts with our monitor tag
     $q="
 select h.id host_id,
        concat(dns.name,'.',b.name) fqdn,
        custom_attribute_types.name name,
+       locations.reference site,
        ca.value value
 from dns,
      domains b,
      custom_attributes ca,
      custom_attribute_types,
+     locations,
+     interfaces,
+     devices,
      hosts h
 where dns.domain_id = b.id
+and   h.device_id = devices.id
+and   locations.id = devices.location_id
 and   h.primary_dns_id = dns.id
 and   h.id in ( select table_id_ref
                 from custom_attributes c,
@@ -108,6 +139,14 @@ and   h.id in ( select table_id_ref
 and h.id = ca.table_id_ref
 and ca.table_name_ref = 'hosts'
 AND ca.custom_attribute_type_id = custom_attribute_types.id
+and interfaces.id = dns.interface_id
+and interfaces.subnet_id not in (select c.table_id_ref
+                from custom_attributes c,
+                     custom_attribute_types t
+                where t.name = 'monitor'
+                and c.table_name_ref = 'subnets'
+                and c.value like 'N'
+                and c.custom_attribute_type_id = t.id )
 and {$ca_type_ignore}
 order BY h.id";
 
@@ -122,10 +161,21 @@ order BY h.id";
 
     // Loop through hosts with attributes
     while ($ca = $rs->FetchRow()) {
+      // default the site to the location reference
+      $site = $ca['site'];
       // Capture the tags
-      if ( $ca['name'] == 'lifecycle' ) { $lifecycles[] = $ca['value']; }
+      if ( $ca['name'] == 'lifecycle' ) {
+        $lifecycles[] = $ca['value'];
+        // Track whether this host has a lifecycle defined
+        $cmkcalist[$ca['fqdn']]['haslifecycle'] = true;
+      }
+      // Override the location based site with a custom attribute site
+      if ( $ca['name'] == 'cmk_site' ) {
+        $site = $ca['value'];
+      } else {
       // build check_mk tag list from custom attributes like "<cakey>-<cavalue>"
       $cmkcalist[$ca['fqdn']]['calist']="{$cmkcalist[$ca['fqdn']]['calist']}|{$ca['name']}-{$ca['value']}";
+      }
 
       // Query for tag selection
       $tag_query="
@@ -139,12 +189,17 @@ GROUP BY h.id";
       $tag_rs = $onadb->Execute($tag_query);
       $taglist = $tag_rs->FetchRow();
       // Store tags in our host array
-      $cmkcalist[$ca['fqdn']]['taglist'] = $taglist['tags'];
+      if ($taglist!='') $cmkcalist[$ca['fqdn']]['taglist'] = "|{$taglist['tags']}";
       // Gather up all tags we have found
       //$tags = array_merge($tags,explode("|",$taglist));
 
-    }
+      // Clean up our site value
+      $site = strtoupper(preg_replace("/[^A-Za-z0-9_.]/", '', $site));
+      // Add site to the array for later
+      $cmkcalist[$ca['fqdn']]['site'] = $site;
 
+
+    }
 
     // close record sets
     $rs->Close();
@@ -153,39 +208,116 @@ GROUP BY h.id";
 
   if (isset($options['all_hosts'])) {
     $text = "
+# This file is autogenerated by OpenNetAdmin check_mk_conf module. Do not edit here.
+
 # Lock wato from making changes
 _lock = True
 
-# Autogenerated by OpenNetAdmin check_mk_conf module. Do not edit here.
+# Define our hosts with a list of tags
 all_hosts += [
 ";
 
     // Print out our combined results for this host
     foreach ($cmkcalist as $cafqdn => $cahost) {
-      $text .= "  \"{$cafqdn}{$cahost['calist']}|{$cahost['taglist']}|/\" + FOLDER_PATH + \"/\",\n";
+      // Add a notset lifecycle if one was not set
+      $nolifecycle = '';
+      if (!$cahost['haslifecycle']) {
+        $nolifecycle = '|lifecycle-notset';
+      }
+      // print our host entry with all tag data
+      $text .= "  \"{$cafqdn}|site:{$cahost['site']}{$cahost['calist']}{$cahost['taglist']}{$nolifecycle}|/\" + FOLDER_PATH + \"/\",\n";
     }
     $text .= "]\n\n";
+
+
+    // Set extra settings for site information
+    $text .= "
+# Host attributes (needed for WATO)
+host_attributes.update({
+";
+    foreach ($cmkcalist as $cafqdn => $cahost) {
+      $text .= "  '{$cafqdn}': {'site': '{$cahost['site']}'},\n";
+    }
+    $text .= "})\n\n";
+
+
+
+
   } // end if all_hosts
 
-  if (isset($options['groups'])) {
+  if (isset($options['groups']) or isset($options['wato_groups'])) {
     // This is a non generic use case.. everyone may not need this
     if (is_array($lifecycles)) {
-      // Get a list of lifecycles and define them as host/service groups
-      $text .= "# Autogenerated host/service groups. Do not edit here.\n";
-      $text .= "define_hostgroups = True\n";
-      $text .= "host_groups += [\n";
       $lifecycles=array_unique($lifecycles);
-      foreach ($lifecycles as $lifecycle) {
-        $text .= "  ('lifecycle-{$lifecycle}', ['lifecycle-{$lifecycle}'], ALL_HOSTS),\n";
-      }
-      $text .= "]\n\n";
-      $text .= "define_servicegroups = True\n";
-      $text .= "service_groups += [\n";
-      $lifecycles=array_unique($lifecycles);
-      foreach ($lifecycles as $lifecycle) {
-        $text .= "  ('lifecycle-{$lifecycle}', ['lifecycle-{$lifecycle}'], ALL_HOSTS, ALL_SERVICES),\n";
-      }
-      $text .= "]\n\n";
+
+      if (isset($options['wato_groups'])) {
+        $text .= "# Autogenerated WATO host/service groups. Do not edit here.\n";
+        $text .= "
+if type(define_contactgroups) != dict:
+    define_contactgroups = {}
+define_contactgroups.update({
+  'all': u'Everybody',
+";
+        foreach ($lifecycles as $lifecycle) {
+          $text .= "  'cg-lifecycle-{$lifecycle}': u'{$lifecycle}',\n";
+        }
+        $text .= "})\n\n";
+
+        $text .= "
+if type(define_hostgroups) != dict:
+    define_hostgroups = {}
+define_hostgroups.update({
+";
+        foreach ($lifecycles as $lifecycle) {
+          $text .= "  'lifecycle-{$lifecycle}': u'{$lifecycle}',\n";
+        }
+        $text .= "})\n\n";
+
+        $text .= "
+if type(define_servicegroups) != dict:
+    define_servicegroups = {}
+define_servicegroups.update({
+";
+        foreach ($lifecycles as $lifecycle) {
+          $text .= "  'lifecycle-{$lifecycle}': u'{$lifecycle}',\n";
+        }
+        $text .= "})\n\n";
+      } // End wato_groups section
+
+      // Build the group section that assigns items to their actual group
+      if (isset($options['groups'])) {
+        // Get a list of lifecycles and define them as host/service groups
+        $text .= "# Autogenerated host/service groups. Do not edit here.\n";
+        $text .= "define_hostgroups = True\n";
+        $text .= "host_groups += [\n";
+        foreach ($lifecycles as $lifecycle) {
+          $text .= "  ('lifecycle-{$lifecycle}', ['lifecycle-{$lifecycle}'], ALL_HOSTS),\n";
+        }
+        $text .= "]\n\n";
+  
+        $text .= "define_servicegroups = True\n";
+        $text .= "service_groups += [\n";
+        $lifecycles=array_unique($lifecycles);
+        foreach ($lifecycles as $lifecycle) {
+          $text .= "  ('lifecycle-{$lifecycle}', ['lifecycle-{$lifecycle}'], ALL_HOSTS, ALL_SERVICES),\n";
+        }
+        $text .= "]\n\n";
+  
+        $text .= "# Autogenerated host/service contact groups. Do not edit here.\n";
+        $text .= "define_contactgroups = True\n";
+        $text .= "host_contactgroups += [\n";
+        foreach ($lifecycles as $lifecycle) {
+          $text .= "  ('cg-lifecycle-{$lifecycle}', ['lifecycle-{$lifecycle}'], ALL_HOSTS),\n";
+        }
+        $text .= "]\n\n";
+
+        $text .= "service_contactgroups += [\n";
+        $lifecycles=array_unique($lifecycles);
+        foreach ($lifecycles as $lifecycle) {
+          $text .= "  ('cg-lifecycle-{$lifecycle}', ['lifecycle-{$lifecycle}'], ALL_HOSTS, ALL_SERVICES),\n";
+        }
+        $text .= "]\n\n";
+      } // End groups section
     }
   } // end if host_groups
 
@@ -195,6 +327,9 @@ all_hosts += [
 
   // Build wato host tags, this provides available tags to the gui
   if (isset($options['wato_host_tags'])) {
+
+    // Pre-load our lifecycle with the 'notset' option
+    $calist['lifecycle'][] = 'notset';
 
     // Get a list of the tags
     list($status, $rows, $tags) = db_get_records($onadb, 'tags', 'type = "host"', 'name ASC');
@@ -211,9 +346,9 @@ all_hosts += [
         // Loop through record set
         while ($ca = $rs->FetchRow()) {
           // Gather Lifecycle for later
-          if ( $ca_type['name'] == 'lifecycle' ) { $lifecycles[] = $ca['value']; }
+//          if ( $ca_type['name'] == 'lifecycle' ) { $lifecycles[] = $ca['value']; }
           // For boolean tags, show both true and false states
-          if ( stristr($ca['value'],'Y') || stristr($ca['value'],'N') || stristr($ca['value'],'true') || stristr($ca['value'],'false') ) {
+          if ( preg_match('/^Y$/i',$ca['value']) || preg_match('/^N$/i',$ca['value']) || preg_match('/^true$/i',$ca['value']) || preg_match('/^false$/i',$ca['value']) ) {
             $calist[$ca_type['name']][] = 'true';
             $calist[$ca_type['name']][] = 'false';
           } else {
@@ -222,20 +357,26 @@ all_hosts += [
         }
       }
     }
+
     // Print out our custom attributes
-    // TODO: could print a lifecycle-role option for each as well??
     $text = "
 # Autogenerated by OpenNetAdmin check_mk_conf module. Do not edit here.
 wato_host_tags += [
 ";
-    $text .= "  ('ona-tag', u'ONA tag', [\n";
+    // Set up a list of all ONA tags
+    $text .= "  ('ona-tag', u'OpenNetAdmin Tags/tag', [\n";
+    $text .= "    (None, u'Undef', []),\n";
+    sort($taglist, SORT_NATURAL | SORT_FLAG_CASE);
     foreach (array_unique($taglist) as $tag) {
       $text .= "    ('".strtolower($tag)."', u'".strtolower($tag)."', []),\n";
     }
     $text .= "  ]),\n";
+    // create a tag out of each custom attribute type
     foreach ($calist as $catype => $ca) {
-      $text .= "  ('ona-{$catype}', u'ONA {$catype}', [\n";
+      $text .= "  ('ona-{$catype}', u'OpenNetAdmin Tags/{$catype}', [\n";
+      $text .= "    (None, u'Undef', []),\n";
       $ca=array_unique($ca);
+      sort($ca, SORT_NATURAL | SORT_FLAG_CASE);
       foreach ($ca as $cavalue) {
         $text .= "    ('{$catype}-".strtolower($cavalue)."', u'".strtolower($cavalue)."', []),\n";
       }
@@ -251,6 +392,7 @@ wato_host_tags += [
 
 
 TODO: maybe generate host aliases???
+      does not seem we can add more than one alias?  would be nice to alias all A records to a host?
 # Autogenerated EC2 host aliases. Do not edit here.
 extra_host_conf.setdefault('alias', []).extend([
   (u'prod01-api01', ['prod01-api01.us-west-2.kountaccess.com']),
