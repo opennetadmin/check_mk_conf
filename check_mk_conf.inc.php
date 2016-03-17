@@ -117,6 +117,7 @@ select h.id host_id,
        concat(dns.name,'.',b.name) fqdn,
        custom_attribute_types.name name,
        locations.reference site,
+       ip_addr,
        ca.value value
 from dns,
      domains b,
@@ -163,6 +164,13 @@ order BY h.id";
     while ($ca = $rs->FetchRow()) {
       // default the site to the location reference
       $site = $ca['site'];
+
+      // CUSTOM:
+      // based on IP being in the 10.100 block, force it to corp site
+      if ( ($ca['ip_addr'] > 174325760 && $ca['ip_addr'] < 174391295) ) {
+        $site = 'corp';
+      }
+
       // Capture the tags
       if ( $ca['name'] == 'lifecycle' ) {
         $lifecycles[] = $ca['value'];
@@ -345,8 +353,6 @@ define_servicegroups.update({
       if ($rows) {
         // Loop through record set
         while ($ca = $rs->FetchRow()) {
-          // Gather Lifecycle for later
-//          if ( $ca_type['name'] == 'lifecycle' ) { $lifecycles[] = $ca['value']; }
           // For boolean tags, show both true and false states
           if ( preg_match('/^Y$/i',$ca['value']) || preg_match('/^N$/i',$ca['value']) || preg_match('/^true$/i',$ca['value']) || preg_match('/^false$/i',$ca['value']) ) {
             $calist[$ca_type['name']][] = 'true';
