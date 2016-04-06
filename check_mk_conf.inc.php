@@ -131,11 +131,11 @@ where dns.domain_id = b.id
 and   h.device_id = devices.id
 and   locations.id = devices.location_id
 and   h.primary_dns_id = dns.id
-and   h.id in ( select table_id_ref
+and   h.id not in ( select table_id_ref
                 from custom_attributes c,
                      custom_attribute_types t
                 where t.name = '{$match}'
-                and c.value not like 'N'
+                and c.value like 'N'
                 and c.custom_attribute_type_id = t.id )
 and h.id = ca.table_id_ref
 and ca.table_name_ref = 'hosts'
@@ -224,6 +224,9 @@ _lock = True
 # Define our hosts with a list of tags
 all_hosts += [
 ";
+
+    // Lets sort our list so it is handy!
+    ksort($cmkcalist, SORT_NATURAL);
 
     // Print out our combined results for this host
     foreach ($cmkcalist as $cafqdn => $cahost) {
