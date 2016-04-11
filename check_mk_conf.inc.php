@@ -144,13 +144,41 @@ and interfaces.id = dns.interface_id
 and interfaces.subnet_id not in (select c.table_id_ref
                 from custom_attributes c,
                      custom_attribute_types t
-                where t.name = 'monitor'
+                where t.name = '{$match}'
                 and c.table_name_ref = 'subnets'
                 and c.value like 'N'
                 and c.custom_attribute_type_id = t.id )
 and {$ca_type_ignore}
 order BY h.id";
 
+    // This query selects all hosts that would have been in the list above but
+    // that do not have a custom attribute set at all
+    $q_noca="select h.id host_id,
+       concat(dns.name,'.',b.name) fqdn,
+       locations.reference site,
+       ip_addr
+from dns,
+     domains b,
+     locations,
+     interfaces,
+     devices,
+     hosts h
+where dns.domain_id = b.id
+and   h.device_id = devices.id
+and   locations.id = devices.location_id
+and   h.primary_dns_id = dns.id
+and   h.id not in ( select table_id_ref
+                from custom_attributes c
+                where c.table_name_ref = 'hosts')
+and interfaces.id = dns.interface_id
+and interfaces.subnet_id not in (select c.table_id_ref
+                from custom_attributes c,
+                     custom_attribute_types t
+                where t.name = '{$match}'
+                and c.table_name_ref = 'subnets'
+                and c.value like 'N'
+                and c.custom_attribute_type_id = t.id )
+order BY h.id";
 
     // exectue the query
     $rs = $onadb->Execute($q);
@@ -181,8 +209,8 @@ order BY h.id";
       if ( $ca['name'] == 'cmk_site' ) {
         $site = $ca['value'];
       } else {
-      // build check_mk tag list from custom attributes like "<cakey>-<cavalue>"
-      $cmkcalist[$ca['fqdn']]['calist']="{$cmkcalist[$ca['fqdn']]['calist']}|{$ca['name']}-{$ca['value']}";
+        // build array of custom attributes 
+        $cmkcalist[$ca['fqdn']]['cattributes'][$ca['name']]=$ca['value'];
       }
 
       // Query for tag selection
@@ -209,9 +237,32 @@ GROUP BY h.id";
 
     }
 
+    // process our hosts with no custom attribute at all
+    $rsn = $onadb->Execute($q_noca);
+    if ($rsn === false or (!$rsn->RecordCount())) {
+        $self['error'] = 'ERROR => check_mk_conf(): No Custom Attribute SQL query failed: ' . $onadb->ErrorMsg();
+        printmsg($self['error'], 0);
+        $exit += 1;
+    }
+
+    while ($can = $rsn->FetchRow()) {
+      // default the site to the location reference
+      $site = $can['site'];
+
+      // CUSTOM:
+      // based on IP being in the 10.100 block, force it to corp site
+      if ( ($can['ip_addr'] > 174325760 && $can['ip_addr'] < 174391295) ) {
+        $site = 'corp';
+      }
+
+      $cmkcalist[$can['fqdn']]['site'] = $site;
+      $cmkcalist[$can['fqdn']]['haslifecycle'] = false;
+    }
+
     // close record sets
     $rs->Close();
-#    $tag_rs->Close();
+    $rsn->Close();
+    $tag_rs->Close();
   }
 
   if (isset($options['all_hosts'])) {
@@ -235,8 +286,13 @@ all_hosts += [
       if (!$cahost['haslifecycle']) {
         $nolifecycle = '|lifecycle-notset';
       }
+      // create text from cattributes array
+      $cattribute_text = '';
+      foreach ($cahost['cattributes'] as $caname => $cavalue) {
+        $cattribute_text = "{$cattribute_text}|{$caname}-{$cavalue}";
+      }
       // print our host entry with all tag data
-      $text .= "  \"{$cafqdn}|site:{$cahost['site']}{$cahost['calist']}{$cahost['taglist']}{$nolifecycle}|/\" + FOLDER_PATH + \"/\",\n";
+      $text .= "  \"{$cafqdn}|site:{$cahost['site']}{$cattribute_text}{$cahost['taglist']}{$nolifecycle}|/\" + FOLDER_PATH + \"/\",\n";
     }
     $text .= "]\n\n";
 
@@ -247,7 +303,13 @@ all_hosts += [
 host_attributes.update({
 ";
     foreach ($cmkcalist as $cafqdn => $cahost) {
-      $text .= "  '{$cafqdn}': {'site': '{$cahost['site']}'},\n";
+      $text .= "  '{$cafqdn}': {'site': '{$cahost['site']}', ";
+      // process cattributes array
+      $cattribute_text = '';
+      foreach ($cahost['cattributes'] as $caname => $cavalue) {
+        $text .= "'tag_ona-{$caname}': '{$cavalue}', ";
+      }
+      $text .= "},\n";
     }
     $text .= "})\n\n";
 
