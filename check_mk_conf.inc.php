@@ -233,6 +233,8 @@ GROUP BY h.id";
       $site = strtoupper(preg_replace("/[^A-Za-z0-9_.]/", '', $site));
       // Add site to the array for later
       $cmkcalist[$ca['fqdn']]['site'] = $site;
+      // create the artificial custom attribute for site
+      $cmkcalist[$ca['fqdn']]['cattributes']['cmk_site']=$site;
 
 
     }
@@ -332,7 +334,7 @@ define_contactgroups.update({
   'all': u'Everybody',
 ";
         foreach ($lifecycles as $lifecycle) {
-          $text .= "  'cg-lifecycle-{$lifecycle}': u'{$lifecycle}',\n";
+          $text .= "  'cmk-{$lifecycle}': u'{$lifecycle}',\n";
         }
         $text .= "})\n\n";
 
@@ -380,14 +382,14 @@ define_servicegroups.update({
         $text .= "define_contactgroups = True\n";
         $text .= "host_contactgroups += [\n";
         foreach ($lifecycles as $lifecycle) {
-          $text .= "  ('cg-lifecycle-{$lifecycle}', ['lifecycle-{$lifecycle}'], ALL_HOSTS),\n";
+          $text .= "  ('cmk-{$lifecycle}', ['lifecycle-{$lifecycle}'], ALL_HOSTS),\n";
         }
         $text .= "]\n\n";
 
         $text .= "service_contactgroups += [\n";
         $lifecycles=array_unique($lifecycles);
         foreach ($lifecycles as $lifecycle) {
-          $text .= "  ('cg-lifecycle-{$lifecycle}', ['lifecycle-{$lifecycle}'], ALL_HOSTS, ALL_SERVICES),\n";
+          $text .= "  ('cmk-{$lifecycle}', ['lifecycle-{$lifecycle}'], ALL_HOSTS, ALL_SERVICES),\n";
         }
         $text .= "]\n\n";
       } // End groups section
